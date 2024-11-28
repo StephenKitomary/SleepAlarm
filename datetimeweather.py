@@ -72,9 +72,10 @@ def get_time():
 
 # Function to display data on OLED
 def display_data(date, time, temp_min, temp_max):
+
+    """We could create another function to determine the starting point of a character to display on a screen"""
+    #Clear the Screen
     oled.fill(0)  
-    
-    
     oled.text(f"{date}", 0, 0)
     
     # Display time
