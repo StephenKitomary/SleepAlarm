@@ -1,260 +1,445 @@
-// Use the MD_MAX72XX library to simuate an hourglass
-//
-// Uses the graphics functions to animate an hourglass on 
-// two matrix modules.The matrices are placed diagonally touching
-// at one point.
-// 
+#define PIN_DIN 23
+#define PIN_CLK 18
+#define PIN_CS  5
+#define NUM_DEVICES 2
 
-#include <MD_MAX72xx.h>
-#include <SPI.h>
+#include <LedControl.h>
 
-#define DEBUG 0   // Enable or disable (default) debugging output
+LedControl lc = LedControl(PIN_DIN, PIN_CLK, PIN_CS, NUM_DEVICES);
 
-#if DEBUG
-#define PRINT(s, v)   do { Serial.print(F(s)); Serial.print(v); } while(false)      // Print a string followed by a value (decimal)
-#define PRINTX(s, v)  do { Serial.print(F(s)); Serial.print(v, HEX); } while(false) // Print a string followed by a value (hex)
-#define PRINTS(s)     do { Serial.print(F(s)); } while(false)                       // Print a string
-#define PRINTP(s, p)  do { Serial.print(F(s)); Serial.print(F(" [")); Serial.print(p.r); Serial.print(F(",")); Serial.print(p.c), Serial.print(F("]")); } while(false)
-#else
-#define PRINT(s, v)   // Print a string followed by a value (decimal)
-#define PRINTX(s, v)  // Print a string followed by a value (hex)
-#define PRINTS(s)     // Print a string
-#define PRINTP(s, p)  // Print a point value
+#define Matrix_Width 8
+#define Matrix_Heigth 8
+#define PIN_Tilt 5
+
+#define LedMatrixAttached 1
+#define Speedup 0
+
+bool top[Matrix_Width][Matrix_Heigth];
+bool bottom[Matrix_Width][Matrix_Heigth];
+
+enum Orientations
+{
+  TopBottom = 0,
+  BottomTop = 1
+} orientation = TopBottom;
+
+typedef enum {
+  Top = 0,
+  Bottom = 1
+} Glass;
+
+const int maxIterations = 513;
+int counter = 0;
+int blinkCounter = 0;
+unsigned long startTime = 0;
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 50;
+
+void setup() {
+  Serial.begin(115200);  
+  pinMode(PIN_Tilt, INPUT_PULLUP);
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);
+
+  randomSeed(analogRead(0));
+
+  SetupMatrix();
+}
+
+void loop() {  
+  PhysicLoop();  
+}
+
+void SetupMatrix() {
+  for (int index = 0; index < lc.getDeviceCount(); index++) {
+    lc.shutdown(index, false);
+    lc.setIntensity(index, 2);
+    lc.clearDisplay(index);
+  }
+  orientation = (digitalRead(PIN_Tilt) > 0) ? BottomTop : TopBottom;
+  CheckTilt();
+  ResetMatrix();
+}
+
+void ResetMatrix() {  
+  SetAll(GetGlass(Top), orientation == TopBottom);
+  SetAll(GetGlass(Bottom), orientation == BottomTop);
+  counter = 0;
+  startTime = 0;
+  blinkCounter = 0;
+}
+
+void PhysicLoop() {
+  CheckTilt();
+
+  if (startTime == 0)
+    startTime = millis();
+
+  if (counter >= maxIterations + 1) {
+    EndBlink();
+    return;
+  } else {
+    counter++;
+  }
+
+  bool topTick = IterateRows(Top);
+  bool bottomTick = IterateRows(Bottom);
+  bool transferGrain;
+  if (!topTick && !bottomTick)
+    transferGrain = TransferPixel();
+
+  if (!topTick && !bottomTick && !transferGrain) {
+    EndClock();
+    return;
+  }
+
+#if !LedMatrixAttached
+  Print();
 #endif
 
-// --------------------
-// MD_MAX72xx hardware definitions and object
-// Define the number of devices we have in the chain and the hardware interface
-// NOTE: These pin numbers will probably not work with your hardware and may
-// need to be adapted
-//
-#define HARDWARE_TYPE MD_MAX72XX::FC16_HW
-#define MAX_DEVICES 2
-#define CLK_PIN   18  // or SCK
-#define DATA_PIN  23  // or MOSI
-#define CS_PIN    5  // or SS
+  if (CheckGlasses())
+    counter = 1000;
 
-MD_MAX72XX mx = MD_MAX72XX(HARDWARE_TYPE, CS_PIN, MAX_DEVICES);                      // SPI hardware interface
-//MD_MAX72XX mx = MD_MAX72XX(HARDWARE_TYPE, DATA_PIN, CLK_PIN, CS_PIN, MAX_DEVICES); // Arbitrary pins
-
-#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
-
-// ========== Data Types ===========
-//
-typedef enum { ATT_HIHI = 0, ATT_HI = 1, ATT_LO = 2, ATT_LOLO = 3 } attractorId_t;
-typedef enum { FLOW_HI2LO, FLOW_LO2HI } flowDirection_t;    // flow direction for particles (HI->LO or LO->HI)
-
-// Define a generic point
-typedef struct
-{
-  int8_t r, c;       // the row and column coordinates for this point
-} coord_t;
-
-// Define tracking data for a particle
-typedef struct
-{
-  attractorId_t att;  // the id for the attractor relevelt to this element
-  coord_t p;          // position calculated for this particle
-} particle_t;
-
-// --------------------
-// Hourglass switch parameters
-//
-const uint8_t FLOW_SWITCH = 9;  // the hourglass has been rotated
-
-// ========== General Variables ===========
-//
-particle_t particle[] =
-{
-// Initialize the attractor and coordinate for the particles
-{ATT_HI,{7,7}}, {ATT_HI,{7,6}}, {ATT_HI,{7,5}}, {ATT_HI,{7,4}}, {ATT_HI,{7,3}}, {ATT_HI,{7,2}}, {ATT_HI,{7,1}}, {ATT_HI,{7,0}},
-{ATT_HI,{6,7}}, {ATT_HI,{6,6}}, {ATT_HI,{6,5}}, {ATT_HI,{6,4}}, {ATT_HI,{6,3}}, {ATT_HI,{6,2}}, {ATT_HI,{6,1}}, {ATT_HI,{6,0}},
-{ATT_HI,{5,7}}, {ATT_HI,{5,6}}, {ATT_HI,{5,5}}, {ATT_HI,{5,4}}, {ATT_HI,{5,3}}, {ATT_HI,{5,2}}, {ATT_HI,{5,1}},
-{ATT_HI,{4,7}}, {ATT_HI,{4,6}}, {ATT_HI,{4,5}}, {ATT_HI,{4,4}}, {ATT_HI,{4,3}}, {ATT_HI,{4,2}},
-{ATT_HI,{3,7}}, {ATT_HI,{3,6}}, {ATT_HI,{3,5}}, {ATT_HI,{3,4}}, {ATT_HI,{3,3}},
-{ATT_HI,{2,7}}, {ATT_HI,{2,6}}, {ATT_HI,{2,5}}, {ATT_HI,{2,4}},
-{ATT_HI,{1,7}}, {ATT_HI,{1,6}}, {ATT_HI,{1,5}},
-{ATT_HI,{0,7}}, {ATT_HI,{0,6}}
-};
-
-flowDirection_t flowCur = FLOW_HI2LO;     // current flow direction
-flowDirection_t flowPrev = FLOW_HI2LO;    // previous flow direction
-
-// --------------------
-// Constant parameters
-//
-const uint32_t TOTAL_TIMER = 3000; // in milliseconds
-const uint32_t STEP_TIME = (TOTAL_TIMER / ARRAY_SIZE(particle));
-
-const coord_t ATTRACTOR[4] =  // coordinates of attractors in the 'vertical' diagonal of the display
-{
-  {0, 0},     // ATT_HIHI
-  {7, 7},     // ATT_HI
-  {0, 8},     // ATT_LO
-  {7, 15}     // ATT_LOLO
-};
-
-// ========== Control routines ===========
-//
-
-void updateDisplay(void)
-{
-  mx.control(MD_MAX72XX::UPDATE, MD_MAX72XX::OFF);
-  mx.clear();
-  for (uint8_t i = 0; i < ARRAY_SIZE(particle); i++)
-    mx.setPoint(particle[i].p.r, particle[i].p.c, true);
-  mx.control(MD_MAX72XX::UPDATE, MD_MAX72XX::ON);
-}
-
-int16_t d2(const coord_t p, const coord_t q)
-// work out the distance^2 between 2 points
-{
-  int16_t dr, dc;
-
-  dr = (p.r - q.r);
-  dr *= dr;
-  dc = (p.c - q.c);
-  dc *= dc;
-
-  return (dr + dc);
-}
-
-int16_t findParticle(const coord_t p)
-// Return the element index for the point p in the element array.
-// If not found return -1.
-{
-  for (uint16_t i = 0; i < ARRAY_SIZE(particle); i++)
-    if (particle[i].p.r == p.r && particle[i].p.c == p.c)
-      return(i);
-
-  return(-1);
-}
-
-void moveParticle(particle_t& pa)
-{
-  coord_t q;
-
-  // set up the minimum to be the current point
-  int16_t dMin = d2(pa.p, ATTRACTOR[pa.att]);
-  int8_t drMin = 0, dcMin = 0;
-
-  for (int8_t dr = -1; dr <= 1; dr++)
-  {
-    for (int8_t dc = -1; dc <= 1; dc++)
-    {
-      // new coordinates to test
-      q.r = pa.p.r + dr;
-      q.c = pa.p.c + dc;
-
-      // avoid out of bounds conditions
-      bool inbound = (q.r >= 0 && q.r < ROW_SIZE)     // fits vertically
-                  && (((pa.att == ATT_HI || pa.att == ATT_HIHI) && (q.c >= 0 && q.c < COL_SIZE)) // hourglass top limits
-                     || ((pa.att == ATT_LO || pa.att == ATT_LOLO) && (q.c >= COL_SIZE && q.c < mx.getColumnCount()))); // hourglass bottom limits
-      if (inbound)
-      {
-        //work out the distance to the attractor
-        int32_t d = d2(q, ATTRACTOR[pa.att]);
-
-        // check for this being a new minimum and empty space
-        // if distance is the same, then use a random value to flip a coin on choice
-        if ((d < dMin || (d == dMin && random(100) < 50)) && findParticle(q) == -1)
-        {
-          drMin = dr;
-          dcMin = dc;
-          dMin = d;
-        }
-      }
-    }
-  }
-
-  // save the minimum (which could be the same point)
-  pa.p.r += drMin;
-  pa.p.c += dcMin;
-}
-
-void moveAll(void)
-{
-  for (uint16_t i = 0; i < ARRAY_SIZE(particle); i++)
-    moveParticle(particle[i]);
-}
-
-void setFlowDirection(void)
-// detect the current flow direction and change over all the particle flows
-// if it has changed.
-{
-  flowCur = (digitalRead(FLOW_SWITCH) == HIGH) ? FLOW_HI2LO : FLOW_LO2HI;
-
-  // detect edge transition
-  if (flowCur != flowPrev)
-  {
-    PRINTS("\n->FLOW change");
-    flowPrev = flowCur;
-    for (uint8_t i = 0; i < ARRAY_SIZE(particle); i++)
-      switch (particle[i].att)
-      {
-      case ATT_HIHI:
-      case ATT_HI:
-        particle[i].att = (flowCur == FLOW_HI2LO) ? ATT_HI : ATT_HIHI; 
-        break;
-      case ATT_LO:
-      case ATT_LOLO: 
-        particle[i].att = (flowCur == FLOW_HI2LO) ? ATT_LOLO : ATT_LO; 
-        break;
-      }
-  }
-}
-
-void checkTransition(void)
-// Detect and handle transitions at the necking points (corners)
-// depending on the flow direction.
-// * FLOW_HI2LO transitions between ATT_HI to ATT_LO
-// * FLOW_LO2HI transitions between ATT_LO to ATT_HI
-{
-  // is a particle ready to transition? 
-  int16_t idx = findParticle(ATTRACTOR[(flowCur == FLOW_HI2LO) ? ATT_HI : ATT_LO]);  // top of the neck
-  if (idx != -1)
-  {
-    PRINTP("\n->TRANSITION ready", particle[idx].p);
-    // is there a space for it to move into?
-    if (findParticle(flowCur == FLOW_HI2LO ? ATTRACTOR[ATT_LO] : ATTRACTOR[ATT_HI]) == -1) // bottom of the neck
-    {
-      // move the particle across the neck and set the new attractor
-      particle[idx].p.r = (flowCur == FLOW_HI2LO) ? ATTRACTOR[ATT_LO].r : ATTRACTOR[ATT_HI].r;
-      particle[idx].p.c = (flowCur == FLOW_HI2LO) ? ATTRACTOR[ATT_LO].c : ATTRACTOR[ATT_HI].c;
-      particle[idx].att = (flowCur == FLOW_HI2LO) ? ATT_LOLO : ATT_HIHI;
-    }
-  }
-}
-
-void setup(void)
-{
-#if DEBUG
-  Serial.begin(57600);
+#if Speedup
+  delay(100);
+  return;
 #endif
-  PRINTS("\n[MD_MAX72XX Hourglass]");
 
-  // matrix initialization
-  mx.begin();
-  updateDisplay();
-
-  // set up the UI hardware
-  pinMode(FLOW_SWITCH, INPUT_PULLUP);
+  // Dynamically calculate delay per iteration
+  unsigned long iterationDelay = targetDuration / maxIterations;
+  delay(iterationDelay);
 }
 
-void loop(void)
-{
-  static uint32_t timeLast = 0;
 
-  // process user interface direction input
-  setFlowDirection();
+bool TransferPixel() {
+  bool topValue = GetValue(Top, Matrix_Width + Matrix_Heigth - 2, 0);
+  bool bottomValue = GetValue(Bottom, 0, 0);
 
-  // when time expires, work out the next animation frame
-  if (millis() - timeLast >= STEP_TIME)
-  {
-    timeLast += STEP_TIME;
-    moveAll();            // move all particles towards the attractor
-    checkTransition();    // check movement from one segment of hourglass to the other
-    updateDisplay();      // update the display with new frame
+  if (topValue && !bottomValue)
+    CopyPixel(Top, Matrix_Width + Matrix_Heigth - 2, 0, Bottom, 0, 0);
+  return topValue && !bottomValue;
+}
+
+bool IterateRows(uint8_t glass) {
+  bool prevLineHasValues = false;
+  for (uint8_t i = 0; i < Matrix_Heigth + Matrix_Width - 1; i++) {
+    bool lineFilled = IsLineFilled(glass, i);
+    bool lineHasGaps = lineFilled ? HasLineGap(glass, i) : true;
+    bool nextLineHasGaps = i < Matrix_Heigth + Matrix_Width - 1 ? HasLineGap(glass, i + 1) : false;
+    bool ticked = false;
+
+    if (prevLineHasValues && lineHasGaps)
+      ticked = FillGapFromAbove(glass, i);
+    if (lineFilled && lineHasGaps && nextLineHasGaps)
+      ticked = FillGapBelow(glass, i);
+    //only one tick per iteration
+    if (ticked)
+      return true;
+    prevLineHasValues = lineFilled;
+  }
+  return false;
+}
+
+bool FillGapFromAbove(uint8_t glass, uint8_t row) {
+
+  uint8_t columns[Matrix_Width];
+  uint8_t NoOfColums = GetRow(row - 1, columns);
+  uint8_t colPrev;
+
+  NoOfColums = GetRow(row, columns);
+  uint8_t colCurr;
+  for (colCurr = 0; colCurr < NoOfColums; colCurr++) {
+    bool value = GetValue(glass, row, colCurr);
+    if (!value)
+      break;
+  }
+
+  colPrev = GetNextPixel(glass, row - 1, row, colCurr, true);
+
+  CopyPixel(glass, row - 1, colPrev, glass, row, colCurr);
+  return true;
+}
+
+bool FillGapBelow(uint8_t glass, uint8_t row) {
+
+  uint8_t columns[Matrix_Width];
+  uint8_t NoOfColums = GetRow(row + 1, columns);
+  uint8_t colNext;
+  uint8_t colCurr;
+
+  NoOfColums = GetRow(row, columns);
+  for (colCurr = 0; colCurr < NoOfColums; colCurr++)
+    if (GetValue(glass, row, colCurr))
+      break;
+
+  colNext = GetNextPixel(glass, row + 1, row, colCurr, false);
+
+  //Line below already full:
+  if (GetValue(glass, row + 1, colNext))
+    return false;
+  CopyPixel(glass, row, colCurr, glass, row + 1, colNext);
+  return true;
+}
+
+bool IsLineFilled(uint8_t glass, uint8_t row) {
+  uint8_t columns[Matrix_Width];
+  uint8_t NoOfColums = GetRow(row, columns);
+  for (uint8_t i = 0; i < NoOfColums; i++) {
+    bool value = GetValue(glass, row, i);
+    if (value)
+      return true;
+  }
+  return false;
+}
+
+bool HasLineGap(uint8_t glass, uint8_t row) {
+  uint8_t columns[Matrix_Width];
+  uint8_t NoOfColums = GetRow(row, columns);
+  for (uint8_t i = 0; i < NoOfColums; i++) {
+    bool value = GetValue(glass, row, i);
+    if (!value)
+      return true;
+  }
+  return false;
+}
+
+uint8_t GetGlass(uint8_t glass) {
+  if (orientation == TopBottom)
+    return glass == Top ? 0 : 1;
+  return glass == Top ? 1 : 0;
+}
+
+void Print() {
+  PrintMatrix(Top);
+  PrintMatrix(Bottom);
+}
+
+void PrintMatrix(uint8_t glass) {
+  uint8_t no = GetGlass(glass);
+  switch (no) {
+    case 0:
+      PrintArray(top);
+      break;
+    case 1:
+      PrintArray(bottom);
+      break;
   }
 }
 
+void PrintArray(bool arr[Matrix_Heigth][Matrix_Width]) {
+  for (int i = 0; i < Matrix_Heigth + Matrix_Width - 1; i++) {
+    int startRow = max(0, i - Matrix_Width + 1);
+    int startCol = min(i, Matrix_Width - 1);
+    int numElements = min(i + 1, Matrix_Heigth - startRow);
+    for (uint8_t space = 0; space < Matrix_Width - numElements; space++)
+      Serial.print(" ");
+    for (int j = 0; j < numElements; j++) {
+      int x = startRow + j;
+      int y = startCol - j;
+      int value = arr[x][y];
+      Serial.print(value ? "X" : "0");
+      Serial.print(" ");
+    }
+    Serial.println();
+  }
+}
+
+void SetAll(uint8_t glass, bool state) {
+  for (int y = 0; y < Matrix_Heigth; y++)
+    for (int x = 0; x < Matrix_Width; x++)
+      SetPixelByCoordinates(glass, x, y, state);
+}
+
+void CopyPixel(uint8_t glassFrom, uint8_t rowFrom, uint8_t colFrom, uint8_t glassTo, uint8_t rowTo, uint8_t colTo) {
+  bool state = GetValue(glassFrom, rowFrom, colFrom);
+  SetPixel(glassFrom, rowFrom, colFrom, !state);
+  SetPixel(glassTo, rowTo, colTo, state);
+}
+
+void CopyPixelByCoordinates(uint8_t glassFrom, uint8_t xFrom, uint8_t yFrom, uint8_t glassTo, uint8_t xTo, uint8_t yTo) {
+  SetPixelByCoordinates(glassFrom, xFrom, yFrom, false);
+  SetPixelByCoordinates(glassTo, xTo, yTo, true);
+}
+
+void SetPixel(uint8_t glass, uint8_t row, uint8_t col, bool state) {
+  uint8_t x;
+  uint8_t y;
+  GetCoordinates(row, col, x, y);
+  SetPixelByCoordinates(glass, x, y, state);
+}
+void SetPixelByCoordinates(uint8_t glass, uint8_t x, uint8_t y, bool state) {
+  uint8_t glassId = GetGlass(glass);
+  
+  switch (glassId) {
+    case 0:
+      top[x][y] = state;
+      break;
+    case 1:
+      bottom[x][y] = state;
+      break;
+  }
+  //Invert matrixes...
+  lc.setLed(glassId ? 0 : 1, x, y, state);
+}
+
+void GetCoordinates(uint8_t row, uint8_t col, uint8_t& x, uint8_t& y) {
+  if (orientation == BottomTop)
+    row = (Matrix_Width + Matrix_Heigth - 2) - row;
+
+  int startRow = max(0, row - Matrix_Width + 1);
+  int startCol = min(row, Matrix_Width - 1);
+  int numElements = min(row + 1, Matrix_Heigth - startRow);
+  x = startRow + col;
+  y = startCol - col;
+}
+
+void PrintPixel(uint8_t glass, uint8_t row, uint8_t col) {
+  uint8_t x;
+  uint8_t y;
+  GetCoordinates(row, col, x, y);
+  bool value;
+  switch (GetGlass(glass)) {
+    case 0:
+      value = top[x][y];
+      break;
+    case 1:
+      value = bottom[x][y];
+      break;
+  }
+  Serial.print(value ? "X" : "0");
+  Serial.print(" (" + String(row));
+  Serial.print("/" + String(col));
+  Serial.print(") [" + String(x));
+  Serial.print("," + String(y));
+  Serial.print("]");
+  Serial.print(" " + String(GetLedNo(x, y)));
+  Serial.print(" ");
+}
+
+uint8_t GetLedNo(uint8_t x, uint8_t y) {
+  return x + y * Matrix_Width;
+}
+
+uint8_t GetRow(uint8_t rowNo, uint8_t *columns) {
+  if (orientation == BottomTop)
+    rowNo = (Matrix_Width + Matrix_Heigth - 2) - rowNo;
+
+  uint8_t c = 0;
+  int startRow = max(0, rowNo - Matrix_Width + 1);
+  int startCol = min(rowNo, Matrix_Width - 1);
+  int numElements = min(rowNo + 1, Matrix_Heigth - startRow);
+  for (int j = 0; j < numElements; j++) {
+    int row = startRow + j;
+    int col = startCol - j;
+    columns[c++] = col;
+  }
+  if (c <= Matrix_Width - 1)
+    columns[c] = 255;
+  return numElements;
+}
+uint8_t GetNextPixel(uint8_t glass, uint8_t rowTo, uint8_t rowFrom, uint8_t colFrom, bool state) {
+  uint8_t colTo = 0;
+  uint8_t columns[Matrix_Width];
+  uint8_t NoOfPrevColumns = GetRow(rowFrom, columns);
+  uint8_t NoOfColumns = GetRow(rowTo, columns);
+
+  if (NoOfColumns <= 1)
+    return colTo;
+
+  //X 0
+  // 0
+  if (NoOfColumns < NoOfPrevColumns) {
+    if (colFrom == 0)
+      colTo = 0;
+    else if (colFrom >= NoOfColumns - 1)
+      colTo = NoOfColumns - 1;
+    else
+      colTo = random(colFrom - 1, colFrom + 1);
+  }
+
+  // 0 0
+  //X 0 0
+  if (NoOfColumns > NoOfPrevColumns) {
+    colTo = random(colFrom, colFrom + 2);
+  }
+
+  if (GetValue(glass, rowTo, colTo) == state)
+    return colTo;
+
+  if (colFrom > NoOfColumns - 1)
+    colFrom = NoOfColumns - 1;
+  if (random(0, 2) == 1) {
+    //Next
+    for (colTo = colFrom; colTo < NoOfColumns; colTo++)
+      if (GetValue(glass, rowTo, colTo) == state)
+        return colTo;
+  } else {
+    //Prev
+    for (colTo = colFrom; colTo > 0; colTo--)
+      if (GetValue(glass, rowTo, colTo) == state)
+        return colTo;
+  }
+
+  //Fallback:
+  for (colTo = 0; colTo < NoOfColumns; colTo++)
+    if (GetValue(glass, rowTo, colTo) == state)
+      return colTo;
+
+  return colTo;
+}
+bool GetValue(uint8_t glass, uint8_t row, uint8_t col) {
+  uint8_t x;
+  uint8_t y;
+  GetCoordinates(row, col, x, y);
+  return GetValueByCoordinates(glass, x, y);
+}
+bool GetValueByCoordinates(uint8_t glass, uint8_t x, uint8_t y) {
+  switch (GetGlass(glass)) {
+    case 0:
+      return top[x][y];
+      break;
+    case 1:
+      return bottom[x][y];
+      break;
+  }
+}
+
+void CheckTilt() {
+  int tiltValue = digitalRead(PIN_Tilt);
+  if((orientation == TopBottom ? LOW : HIGH) == tiltValue){
+    lastDebounceTime = millis();
+    return;
+  }
+  if ((millis() - lastDebounceTime) > debounceDelay)
+    orientation = tiltValue;
+  else
+    return;
+  
+  digitalWrite(LED_BUILTIN, orientation == TopBottom ? LOW : HIGH);
+  Serial.println(orientation == TopBottom ? "Top Bottom" : "Bottom Top");
+  //change counter:
+  if(counter > 0 && counter < maxIterations)
+    counter = maxIterations - counter;
+  if (counter >= 1000)
+    SetupMatrix();
+}
+
+bool CheckGlasses() {
+  uint8_t topCounter = 0;
+  uint8_t bottomCounter = 0;
+  for (uint8_t glass = 0; glass <= 1; glass++)
+    for (int y = 0; y < Matrix_Heigth; y++)
+      for (int x = 0; x < Matrix_Width; x++)
+        if (GetValueByCoordinates(glass, x, y))
+          glass == 0 ? topCounter++ : bottomCounter++;
+  if (topCounter + bottomCounter != Matrix_Heigth * Matrix_Width) {
+    Serial.println("Failed!");
+    Serial.println("Top: " + String(topCounter));
+    Serial.println("Bottom: " + String(bottomCounter));
+    Serial.println("Counter: " + String(counter));
+    return true;
+  }
+  return false;
+}
+void EndClock() {
+  
